@@ -220,13 +220,7 @@ public final class KokoroTTS {
     if let tokenArray {
       TimestampPredictor.preditTimestamps(tokens: tokenArray, predictionDuration: predictedDurations)
     }
-
-    // ⏱ Diagnostic: verify samples-per-frame ratio
-    let audioSamples = audio[0].shape[0]
-    let totalPredFrames: Int = predictedDurations.sum().item()
-    let samplesPerFrame = totalPredFrames > 0 ? Double(audioSamples) / Double(totalPredFrames) : 0
-    print("  ⏱ RATIO DIAGNOSTIC: audioSamples=\(audioSamples) predFrames=\(totalPredFrames) samplesPerFrame=\(String(format: "%.2f", samplesPerFrame)) (expected 600)")
-
+    
     // Stop performance timing
     BenchmarkTimer.stopTimer(Constants.bm_TTS)
 
