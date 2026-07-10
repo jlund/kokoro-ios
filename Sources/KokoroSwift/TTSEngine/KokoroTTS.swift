@@ -172,16 +172,19 @@ public final class KokoroTTS {
     // Start performance timing
     BenchmarkTimer.reset()
     BenchmarkTimer.startTimer(Constants.bm_TTS)
+    let clock = TTSStageClock()
 
     // Step 1: Convert text to phonemes
     let (phonemizedText, tokenArray) = try phonemizeText(text)
-    
+    clock.mark("phonemize")
+
     // Step 2: Tokenize and prepare input
     let (paddedInputIds, attentionMask, inputLengths, textMask, inputIds) = try prepareInputTensors(phonemizedText)
-    
+    clock.mark("prepare")
+
     // Step 3: Extract style embeddings from voice
     let (globalStyle, acousticStyle) = extractStyleEmbeddings(from: voice, tokenCount: inputIds.count)
-    
+
     // Step 4: Encode text with BERT and predict duration
     let durationFeatures = encodeBERTAndDuration(
       inputIds: paddedInputIds,
@@ -190,24 +193,30 @@ public final class KokoroTTS {
       textMask: textMask,
       style: globalStyle
     )
-    
+    clock.mark("bert", eval: [durationFeatures])
+
     // Step 5: Predict phoneme durations
-    let (predictedDurations, alignmentTarget) = predictDurations(
-      features: durationFeatures,
-      batchSize: paddedInputIds.shape[1],
-      speed: speed
+    let predictedDurations = predictDurations(features: durationFeatures, speed: speed)
+    clock.mark("durLSTM", eval: [predictedDurations])
+
+    // Step 6: Build the alignment matrix and aligned encodings
+    let alignmentTarget = createAlignmentTarget(
+      durations: predictedDurations,
+      batchSize: paddedInputIds.shape[1]
     )
-    
-    // Step 6: Generate aligned encodings
+    clock.mark("align", eval: [alignmentTarget])
+
     let alignedEncoding = durationFeatures.transposed(0, 2, 1).matmul(alignmentTarget)
-    
+
     // Step 7: Predict prosody (F0, pitch)
     let (f0Prediction, nPrediction) = prosodyPredictor.F0NTrain(x: alignedEncoding, s: globalStyle)
-    
+    clock.mark("prosody", eval: [f0Prediction, nPrediction])
+
     // Step 8: Encode text for decoder
     let textEncoding = textEncoder(paddedInputIds, inputLengths: inputLengths, m: textMask)
     let asrFeatures = MLX.matmul(textEncoding, alignmentTarget)
-    
+    clock.mark("textEnc", eval: [asrFeatures])
+
     // Step 9: Generate audio
     let audio = decoder(
       asr: asrFeatures,
@@ -215,16 +224,23 @@ public final class KokoroTTS {
       N: nPrediction,
       s: acousticStyle
     )[0]
-    
+
     // Try to predict timestamp of each token if G2P processor returns tokens
     if let tokenArray {
       TimestampPredictor.preditTimestamps(tokens: tokenArray, predictionDuration: predictedDurations)
     }
-    
+
     // Stop performance timing
     BenchmarkTimer.stopTimer(Constants.bm_TTS)
 
-    return (audio[0].asArray(Float.self), tokenArray)
+    let samples = audio[0].asArray(Float.self)
+    clock.mark("decoder")
+    clock.finish(
+      tokenCount: inputIds.count,
+      frameCount: alignmentTarget.dim(-1),
+      sampleCount: samples.count
+    )
+    return (samples, tokenArray)
   }
   
   /// Updates the G2P language if it differs from the current language.
@@ -328,25 +344,21 @@ public final class KokoroTTS {
     return durationFeatures
   }
   
-  /// Predicts phoneme durations and creates alignment target matrix.
+  /// Predicts phoneme durations.
   /// - Parameters:
   ///   - features: Duration prediction features from encoder
-  ///   - batchSize: Size of the input batch
   ///   - speed: Speech speed multiplier
-  /// - Returns: Predicted durations and alignment target matrix for duration expansion
-  private func predictDurations(features: MLXArray, batchSize: Int, speed: Float) -> (MLXArray, MLXArray) {
+  /// - Returns: Predicted duration (in frames) for each token
+  private func predictDurations(features: MLXArray, speed: Float) -> MLXArray {
     // Pass through LSTM
     let (lstmOutput, _) = predictorLSTM(features)
-    
+
     // Project to duration values
     let durationLogits = durationProj(lstmOutput)
-    
+
     // Convert to actual durations (clamped to minimum of 1 frame)
     let durationSigmoid = MLX.sigmoid(durationLogits).sum(axis: -1) / speed
-    let predictedDurations = MLX.clip(durationSigmoid.round(), min: 1).asType(.int32)[0]
-    
-    // Create alignment matrix
-    return (predictedDurations, createAlignmentTarget(durations: predictedDurations, batchSize: batchSize))
+    return MLX.clip(durationSigmoid.round(), min: 1).asType(.int32)[0]
   }
   
   /// Creates an alignment target matrix from predicted durations. Maps each phoneme to multiple frames based on duration.
