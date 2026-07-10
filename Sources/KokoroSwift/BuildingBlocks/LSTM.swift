@@ -147,12 +147,13 @@ class LSTM: Module {
       currentCell = f * currentCell + i * g
       currentHidden = o * MLX.tanh(currentCell)
 
-      // Insert at beginning to maintain original sequence order
-      allCell.insert(currentCell, at: 0)
-      allHidden.insert(currentHidden, at: 0)
+      allCell.append(currentCell)
+      allHidden.append(currentHidden)
     }
 
-    return (MLX.stacked(allHidden, axis: -2), MLX.stacked(allCell, axis: -2))
+    // Reverse once so the outputs are in original sequence order; inserting
+    // at index 0 inside the loop is O(n²) at frame-rate sequence lengths.
+    return (MLX.stacked(allHidden.reversed(), axis: -2), MLX.stacked(allCell.reversed(), axis: -2))
   }
 
   func callAsFunction(
