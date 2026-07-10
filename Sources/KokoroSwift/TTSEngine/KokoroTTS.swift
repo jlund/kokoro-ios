@@ -200,7 +200,7 @@ public final class KokoroTTS {
     clock.mark("durLSTM", eval: [predictedDurations])
 
     // Step 6: Build the alignment matrix and aligned encodings
-    let alignmentTarget = createAlignmentTarget(
+    let alignmentTarget = Self.createAlignmentTarget(
       durations: predictedDurations,
       batchSize: paddedInputIds.shape[1]
     )
@@ -367,26 +367,21 @@ public final class KokoroTTS {
   ///   - durations: Predicted duration for each phoneme
   ///   - batchSize: Size of the input batch
   /// - Returns: Alignment matrix [batchSize × totalFrames]
-  private func createAlignmentTarget(durations: MLXArray, batchSize: Int) -> MLXArray {
-    // Create indices array by repeating each index according to its duration
-    let indices = MLX.concatenated(
-      durations.enumerated().map { index, duration in
-        let frameCount: Int = duration.item()
-        return MLX.repeated(MLXArray([index]), count: frameCount)
-      }
-    )
+  static func createAlignmentTarget(durations: MLXArray, batchSize: Int) -> MLXArray {
+    // Token i owns the frame interval [starts[i], ends[i]). Building the
+    // one-hot rows as a broadcast interval-membership test keeps the whole
+    // computation on-device; the only CPU sync is reading totalFrames, which
+    // the frame range's length requires.
+    let ends = durations.cumsum(axis: 0)
+    let starts = ends - durations
+    let totalFrames: Int = ends[batchSize - 1].item()
 
-    // Create one-hot encoded alignment matrix
-    let totalFrames = indices.shape[0]
-    var alignmentArray = [Float](repeating: 0.0, count: totalFrames * batchSize)
-    
-    for frame in 0 ..< totalFrames {
-      let phonemeIndex: Int = indices[frame].item()
-      alignmentArray[phonemeIndex * totalFrames + frame] = 1.0
-    }
-    
-    let alignmentTarget = MLXArray(alignmentArray).reshaped([batchSize, totalFrames])
-    return alignmentTarget.expandedDimensions(axis: 0)
+    let frames = MLXArray(0 ..< totalFrames).expandedDimensions(axis: 0) // [1, F]
+    let alignment = MLX.logicalAnd(
+      frames .>= starts.expandedDimensions(axis: 1),
+      frames .< ends.expandedDimensions(axis: 1)
+    ).asType(.float32) // [batchSize, F]
+    return alignment.expandedDimensions(axis: 0)
   }
   
   /// Constants used throughout the TTS engine.
